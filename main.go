@@ -138,6 +138,7 @@ func main() {
 	// persist state to db
 	// we could use few events here for read model
 	js.Subscribe("users."+id+".>", func(msg *nats.Msg) {
+		log.Printf("Persisting read-model - Received event %s with payload %s", getEvent(msg.Subject), msg.Data)
 		switch getEvent(msg.Subject) {
 		case "created":
 			user, _ := tools.Unmarshal[UserCreated](msg.Data)
@@ -164,7 +165,7 @@ func main() {
 		}
 		// maybe tell FE to update
 		nc.Publish("state."+id, nil)
-	})
+	}, nats.AckExplicit(), nats.Durable("read-model"), nats.ManualAck())
 
 	log.Printf("Final state %+v", state)
 
