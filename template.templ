@@ -9,6 +9,7 @@ templ Main() {
         <body data-on-load="@get('/stream')">
             <h1>Hello, World!</h1>
             <button data-on-click="@post('/post')">Click me</button>
+            <button data-on-click="@post('/error')">Give me an error</button>
             @Part(State{ Address: "" })
         </body>
     </html>
@@ -20,5 +21,8 @@ templ Part(page State) {
     <p>Lastname: { page.Lastname }</p>
     <p>Address: { page.Address }</p>
     <p>Updated at: { page.UpdatedAt } </p>
+    for _, err := range page.Errors {
+        <p style="color: red;">{ err }</p>
+    }
     </div>
 }

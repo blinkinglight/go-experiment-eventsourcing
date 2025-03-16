@@ -72,17 +72,28 @@ func main() {
 		Main().Render(r.Context(), w)
 	})
 
+	r.Post("/error", func(w http.ResponseWriter, r *http.Request) {
+		nc.Publish("errors", []byte("random error"))
+	})
+
 	r.Get("/stream", func(w http.ResponseWriter, r *http.Request) {
 		sse := datastar.NewSSE(w, r)
 		var pipe = make(chan *nats.Msg, 128)
+		var errPipe = make(chan *nats.Msg, 128)
 		sub, _ := js.ChanSubscribe("users."+id+".>", pipe, nats.DeliverAll())
 		defer sub.Unsubscribe()
+		errSub, _ := nc.ChanSubscribe("errors", errPipe)
+		defer errSub.Unsubscribe()
+
 		go func() {
 			var state = State{}
 			for {
 				select {
 				case <-r.Context().Done():
 					return
+				case msg := <-errPipe:
+					state.Errors = append(state.Errors, string(msg.Data))
+					sse.MergeFragmentTempl(Part(state))
 				case msg := <-pipe:
 					switch getEvent(msg.Subject) {
 					case "created":
@@ -212,6 +223,7 @@ type State struct {
 	Address  string
 
 	UpdatedAt string
+	Errors    []string
 	Changes   []string
 }
 
