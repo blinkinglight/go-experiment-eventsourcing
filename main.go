@@ -80,37 +80,35 @@ func main() {
 		sse := datastar.NewSSE(w, r)
 		var pipe = make(chan *nats.Msg, 128)
 		var errPipe = make(chan *nats.Msg, 128)
-		sub, _ := js.ChanSubscribe("users."+id+".>", pipe, nats.DeliverAll())
+		sub, _ := js.ChanSubscribe("users."+id+".>", pipe, nats.DeliverNew())
 		defer sub.Unsubscribe()
 		errSub, _ := nc.ChanSubscribe("errors", errPipe)
 		defer errSub.Unsubscribe()
 
-		go func() {
-			var state = State{}
-			for {
-				select {
-				case <-r.Context().Done():
-					return
-				case msg := <-errPipe:
-					state.Errors = append(state.Errors, string(msg.Data))
-					sse.MergeFragmentTempl(Part(state))
-				case msg := <-pipe:
-					switch getEvent(msg.Subject) {
-					case "created":
-						user, _ := tools.Unmarshal[UserCreated](msg.Data)
-						state.Name = user.Name
-						state.Lastname = user.Lastname
-					case "address":
-						address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
-						state.Address = address.Address
-						state.UpdatedAt = address.CreatedAt
-					}
-					sse.MergeFragmentTempl(Part(state))
-				}
-			}
-		}()
+		var state = replay(r.Context(), nc, "users", id, replayFn)
+		sse.MergeFragmentTempl(Part(state))
 
-		<-r.Context().Done()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case msg := <-errPipe:
+				state.Errors = append(state.Errors, string(msg.Data))
+				sse.MergeFragmentTempl(Part(state))
+			case msg := <-pipe:
+				switch getEvent(msg.Subject) {
+				case "created":
+					user, _ := tools.Unmarshal[UserCreated](msg.Data)
+					state.Name = user.Name
+					state.Lastname = user.Lastname
+				case "address":
+					address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
+					state.Address = address.Address
+					state.UpdatedAt = address.CreatedAt
+				}
+				sse.MergeFragmentTempl(Part(state))
+			}
+		}
 	})
 
 	js.AddStream(&nats.StreamConfig{
