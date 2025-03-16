@@ -92,6 +92,7 @@ func main() {
 					case "address":
 						address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
 						state.Address = address.Address
+						state.UpdatedAt = address.CreatedAt
 					}
 					sse.MergeFragmentTempl(Part(state))
 				}
@@ -210,7 +211,8 @@ type State struct {
 	Lastname string
 	Address  string
 
-	Changes []string
+	UpdatedAt string
+	Changes   []string
 }
 
 type UserCreated struct {
