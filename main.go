@@ -75,7 +75,7 @@ func main() {
 	r.Get("/stream", func(w http.ResponseWriter, r *http.Request) {
 		sse := datastar.NewSSE(w, r)
 		var pipe = make(chan *nats.Msg, 128)
-		sub, _ := js.ChanSubscribe("users.>", pipe, nats.DeliverAll())
+		sub, _ := js.ChanSubscribe("users."+id+".>", pipe, nats.DeliverAll())
 		defer sub.Unsubscribe()
 		go func() {
 			var state = State{}
