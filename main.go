@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -135,6 +137,41 @@ func main() {
 	time.Sleep(1 * time.Second)
 
 	state := replay(ctx, nc, "users", id, replayFn)
+
+	// persist state to db
+	// we could use few events here for read model
+	js.Subscribe("users."+id+".>", func(msg *nats.Msg) {
+		switch getEvent(msg.Subject) {
+		case "created":
+			user, _ := tools.Unmarshal[UserCreated](msg.Data)
+			state.Name = user.Name
+			state.Lastname = user.Lastname
+			state.Changes = append(state.Changes, "created at "+user.CreatedAt)
+		case "address":
+			address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
+			state.Address = address.Address
+			state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+		case "addressv2":
+			address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
+			state.Address = address.Address
+			state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+		case "addressv3":
+			address, _ := tools.Unmarshal[AddressUpdatedV3](msg.Data)
+			state.Address = address.Address + ", " + address.City + ", " + address.Country
+			state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+		default:
+			log.Printf("Unknown event: %s with payload %s", getEvent(msg.Subject), msg.Data)
+		}
+		b, _ := json.Marshal(state)
+		if err := os.WriteFile("state.json", b, 0644); err != nil {
+			log.Printf("Error writing state to file: %s", err)
+			return
+		}
+
+		// maybe tell FE to update
+		nc.Publish("state."+id, b)
+	})
+
 	log.Printf("Final state %+v", state)
 
 	log.Fatal(http.ListenAndServe(":9999", r))
