@@ -3,13 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -164,14 +162,8 @@ func main() {
 		default:
 			log.Printf("Unknown event: %s with payload %s", getEvent(msg.Subject), msg.Data)
 		}
-		b, _ := json.Marshal(state)
-		if err := os.WriteFile("state.json", b, 0644); err != nil {
-			log.Printf("Error writing state to file: %s", err)
-			return
-		}
-
 		// maybe tell FE to update
-		nc.Publish("state."+id, b)
+		nc.Publish("state."+id, nil)
 	})
 
 	log.Printf("Final state %+v", state)
