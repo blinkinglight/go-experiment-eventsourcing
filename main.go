@@ -137,8 +137,11 @@ func main() {
 	state := replay(ctx, nc, "users", id, replayFn)
 	// persist state to db
 	// we could use few events here for read model
-	js.Subscribe("users."+id+".>", func(msg *nats.Msg) {
+	js.Subscribe("users.>", func(msg *nats.Msg) {
 		log.Printf("Persisting read-model - Received event %s with payload %s", getEvent(msg.Subject), msg.Data)
+
+		id := getID(msg.Subject)
+
 		switch getEvent(msg.Subject) {
 		case "created":
 			user, _ := tools.Unmarshal[UserCreated](msg.Data)
@@ -245,6 +248,11 @@ func replay[T any](ctx context.Context, nc *nats.Conn, domain, id string, fn onR
 func getEvent(subject string) string {
 	parts := strings.SplitN(subject, ".", 3)
 	return parts[len(parts)-1]
+}
+
+func getID(subject string) string {
+	parts := strings.SplitN(subject, ".", 3)
+	return parts[1]
 }
 
 type State struct {
