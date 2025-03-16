@@ -137,28 +137,30 @@ func main() {
 	time.Sleep(1 * time.Second)
 
 	state := replay(ctx, nc, "users", id, replayFn)
-
 	// persist state to db
 	// we could use few events here for read model
 	js.Subscribe("users."+id+".>", func(msg *nats.Msg) {
 		switch getEvent(msg.Subject) {
 		case "created":
 			user, _ := tools.Unmarshal[UserCreated](msg.Data)
-			state.Name = user.Name
-			state.Lastname = user.Lastname
-			state.Changes = append(state.Changes, "created at "+user.CreatedAt)
+			_ = user
+			// persist to db
+			// insert into users (id, name, lastname, created_at) values (id, user.Name, user.Lastname, user.CreatedAt)
 		case "address":
 			address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
-			state.Address = address.Address
-			state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+			_ = address
+			// update db
+			// update users set address = address.Address where id = id
 		case "addressv2":
 			address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
-			state.Address = address.Address
-			state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+			_ = address
+			// update db
+			// update users set address = address.Address where id = id
 		case "addressv3":
 			address, _ := tools.Unmarshal[AddressUpdatedV3](msg.Data)
-			state.Address = address.Address + ", " + address.City + ", " + address.Country
-			state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+			_ = address
+			// update db
+			// update users set address = address.Address where id = id
 		default:
 			log.Printf("Unknown event: %s with payload %s", getEvent(msg.Subject), msg.Data)
 		}
