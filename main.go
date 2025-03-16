@@ -2,15 +2,21 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/blinkinglight/go-experiment-eventsourcing/pkg/tools"
+	"github.com/go-chi/chi/v5"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
+	datastar "github.com/starfederation/datastar/sdk/go"
 )
 
 func main() {
@@ -54,8 +60,46 @@ func main() {
 	defer nc.Close()
 
 	id := "z23ntlMT7yPIvFy4FGQ7or"
-
 	js, _ := nc.JetStream()
+
+	r := chi.NewMux()
+
+	r.Post("/post", func(w http.ResponseWriter, r *http.Request) {
+		nc.Publish("commands.post", nil)
+	})
+
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		Main().Render(r.Context(), w)
+	})
+
+	r.Get("/stream", func(w http.ResponseWriter, r *http.Request) {
+		sse := datastar.NewSSE(w, r)
+		var pipe = make(chan *nats.Msg, 128)
+		sub, _ := js.ChanSubscribe("users.>", pipe, nats.DeliverAll())
+		defer sub.Unsubscribe()
+		go func() {
+			var state = State{}
+			for {
+				select {
+				case <-r.Context().Done():
+					return
+				case msg := <-pipe:
+					switch getEvent(msg.Subject) {
+					case "created":
+						user, _ := tools.Unmarshal[UserCreated](msg.Data)
+						state.Name = user.Name
+						state.Lastname = user.Lastname
+					case "address":
+						address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
+						state.Address = address.Address
+					}
+					sse.MergeFragmentTempl(Part(state))
+				}
+			}
+		}()
+
+		<-r.Context().Done()
+	})
 
 	js.AddStream(&nats.StreamConfig{
 		Name:     "users",
@@ -70,43 +114,54 @@ func main() {
 	js.Publish(fmt.Sprintf("users.%s.somethingnotimplementedyet", id), []byte(`{"other":"not implemented yet", "created_at":"2021-12-01"}`))
 	js.Publish(fmt.Sprintf("users.%s.addressv3", id), []byte(`{"address":"v3 address", "city":"v3 city", "country":"v3 country", "created_at":"2021-12-01"}`))
 
+	sb, _ := nc.Subscribe("commands.>", func(msg *nats.Msg) {
+		num, _ := rand.Int(rand.Reader, big.NewInt(1000))
+		number := strconv.Itoa(int(num.Int64()))
+		today := time.Now().Format("2006-01-02")
+		js.Publish(fmt.Sprintf("users.%s.address", id), []byte(`{"address":"`+number+`", "created_at":"`+today+`"}`))
+	})
+	defer sb.Unsubscribe()
+
 	time.Sleep(1 * time.Second)
 
-	state := replay(ctx, nc, "users", id, func(ctx context.Context, id string, msgs <-chan *nats.Msg) (state State) {
-		for {
-			select {
-			case <-ctx.Done():
+	state := replay(ctx, nc, "users", id, replayFn)
+	log.Printf("Final state %+v", state)
+
+	log.Fatal(http.ListenAndServe(":9999", r))
+}
+
+func replayFn(ctx context.Context, id string, msgs <-chan *nats.Msg) (state State) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-msgs:
+			if !ok {
 				return
-			case msg, ok := <-msgs:
-				if !ok {
-					return
-				}
-				switch getEvent(msg.Subject) {
-				case "created":
-					user, _ := tools.Unmarshal[UserCreated](msg.Data)
-					state.Name = user.Name
-					state.Lastname = user.Lastname
-					state.Changes = append(state.Changes, "created at "+user.CreatedAt)
-				case "address":
-					address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
-					state.Address = address.Address
-					state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
-				case "addressv2":
-					address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
-					state.Address = address.Address
-					state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
-				case "addressv3":
-					address, _ := tools.Unmarshal[AddressUpdatedV3](msg.Data)
-					state.Address = address.Address + ", " + address.City + ", " + address.Country
-					state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
-				default:
-					log.Printf("Unknown event: %s with payload %s", getEvent(msg.Subject), msg.Data)
-				}
+			}
+			switch getEvent(msg.Subject) {
+			case "created":
+				user, _ := tools.Unmarshal[UserCreated](msg.Data)
+				state.Name = user.Name
+				state.Lastname = user.Lastname
+				state.Changes = append(state.Changes, "created at "+user.CreatedAt)
+			case "address":
+				address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
+				state.Address = address.Address
+				state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+			case "addressv2":
+				address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
+				state.Address = address.Address
+				state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+			case "addressv3":
+				address, _ := tools.Unmarshal[AddressUpdatedV3](msg.Data)
+				state.Address = address.Address + ", " + address.City + ", " + address.Country
+				state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+			default:
+				log.Printf("Unknown event: %s with payload %s", getEvent(msg.Subject), msg.Data)
 			}
 		}
-	})
-
-	log.Printf("Final state %+v", state)
+	}
 
 }
 
