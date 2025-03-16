@@ -163,6 +163,7 @@ func main() {
 		default:
 			log.Printf("Unknown event: %s with payload %s", getEvent(msg.Subject), msg.Data)
 		}
+		msg.Ack()
 		// maybe tell FE to update
 		nc.Publish("state."+id, nil)
 	}, nats.AckExplicit(), nats.Durable("read-model"), nats.ManualAck())
