@@ -9,17 +9,25 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
+	// "strings" // No longer needed directly by main after moving getID/getEvent
 	"time"
 
+	"github.com/blinkinglight/go-experiment-eventsourcing/pkg/events" // Import the new events package
 	"github.com/blinkinglight/go-experiment-eventsourcing/pkg/tools"
 	"github.com/go-chi/chi/v5"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	datastar "github.com/starfederation/datastar/sdk/go"
+	"database/sql"
+	// Removed duplicate imports below
 )
 
 func main() {
+	db, err := InitDB("read_model.db")
+	if err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.Close()
 
 	ctx := context.Background()
 
@@ -62,6 +70,14 @@ func main() {
 	id := "z23ntlMT7yPIvFy4FGQ7or"
 	js, _ := nc.JetStream()
 
+	// Rebuild the read model on startup
+	log.Println("Attempting to rebuild read model...")
+	if err := RebuildReadModel(js, db, "users", "users.>"); err != nil {
+		log.Fatalf("Failed to rebuild read model: %v", err)
+	} else {
+		log.Println("Read model rebuilt successfully.")
+	}
+
 	r := chi.NewMux()
 
 	r.Post("/post", func(w http.ResponseWriter, r *http.Request) {
@@ -96,13 +112,13 @@ func main() {
 				state.Errors = append(state.Errors, string(msg.Data))
 				sse.MergeFragmentTempl(Part(state))
 			case msg := <-pipe:
-				switch getEvent(msg.Subject) {
+				switch events.GetEvent(msg.Subject) { // Use events.GetEvent
 				case "created":
-					user, _ := tools.Unmarshal[UserCreated](msg.Data)
+					user, _ := tools.Unmarshal[events.UserCreated](msg.Data) // Use events.UserCreated
 					state.Name = user.Name
 					state.Lastname = user.Lastname
 				case "address":
-					address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
+					address, _ := tools.Unmarshal[events.AddressUpdated](msg.Data) // Use events.AddressUpdated
 					state.Address = address.Address
 					state.UpdatedAt = address.CreatedAt
 				}
@@ -138,37 +154,51 @@ func main() {
 	// persist state to db
 	// we could use few events here for read model
 	js.Subscribe("users.>", func(msg *nats.Msg) {
-		log.Printf("Persisting read-model - Received event %s with payload %s", getEvent(msg.Subject), msg.Data)
+		log.Printf("Persisting read-model - Received event %s with payload %s", events.GetEvent(msg.Subject), msg.Data)
 
-		id := getID(msg.Subject)
+		eventID := events.GetID(msg.Subject) // Use events.GetID
 
-		switch getEvent(msg.Subject) {
+		switch events.GetEvent(msg.Subject) { // Use events.GetEvent
 		case "created":
-			user, _ := tools.Unmarshal[UserCreated](msg.Data)
-			_ = user
-			// persist to db
-			// insert into users (id, name, lastname, created_at) values (id, user.Name, user.Lastname, user.CreatedAt)
-		case "address":
-			address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
-			_ = address
-			// update db
-			// update users set address = address.Address where id = id
-		case "addressv2":
-			address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
-			_ = address
-			// update db
-			// update users set address = address.Address where id = id
+			user, err := tools.Unmarshal[events.UserCreated](msg.Data) // Use events.UserCreated
+			if err != nil {
+				log.Printf("Error unmarshalling UserCreated: %v", err)
+				msg.Ack()
+				return
+			}
+			err = HandleUserCreatedEvent(db, eventID, user.Name, user.Lastname, user.CreatedAt)
+			if err != nil {
+				log.Printf("Error handling UserCreatedEvent for ID %s: %v", eventID, err)
+			}
+		case "address", "addressv2":
+			address, err := tools.Unmarshal[events.AddressUpdated](msg.Data) // Use events.AddressUpdated
+			if err != nil {
+				log.Printf("Error unmarshalling AddressUpdated: %v", err)
+				msg.Ack()
+				return
+			}
+			err = HandleAddressUpdatedEvent(db, eventID, address.Address, address.CreatedAt)
+			if err != nil {
+				log.Printf("Error handling AddressUpdatedEvent for ID %s: %v", eventID, err)
+			}
 		case "addressv3":
-			address, _ := tools.Unmarshal[AddressUpdatedV3](msg.Data)
-			_ = address
-			// update db
-			// update users set address = address.Address where id = id
+			address, err := tools.Unmarshal[events.AddressUpdatedV3](msg.Data) // Use events.AddressUpdatedV3
+			if err != nil {
+				log.Printf("Error unmarshalling AddressUpdatedV3: %v", err)
+				msg.Ack()
+				return
+			}
+			fullAddress := address.Address + ", " + address.City + ", " + address.Country
+			err = HandleAddressUpdatedEvent(db, eventID, fullAddress, address.CreatedAt)
+			if err != nil {
+				log.Printf("Error handling AddressUpdatedEvent (V3) for ID %s: %v", eventID, err)
+			}
 		default:
-			log.Printf("Unknown event: %s with payload %s", getEvent(msg.Subject), msg.Data)
+			log.Printf("Unknown event: %s with payload %s", events.GetEvent(msg.Subject), msg.Data) // Use events.GetEvent
 		}
 		msg.Ack()
 		// maybe tell FE to update
-		nc.Publish("state."+id, nil)
+		nc.Publish("state."+eventID, nil)
 	}, nats.AckExplicit(), nats.Durable("read-model"), nats.ManualAck())
 
 	log.Printf("Final state %+v", state)
@@ -185,26 +215,28 @@ func replayFn(ctx context.Context, id string, msgs <-chan *nats.Msg) (state Stat
 			if !ok {
 				return
 			}
-			switch getEvent(msg.Subject) {
+			eventSubject := msg.Subject // Store for repeated use
+			eventData := msg.Data       // Store for repeated use
+			switch events.GetEvent(eventSubject) { // Use events.GetEvent
 			case "created":
-				user, _ := tools.Unmarshal[UserCreated](msg.Data)
+				user, _ := tools.Unmarshal[events.UserCreated](eventData) // Use events.UserCreated
 				state.Name = user.Name
 				state.Lastname = user.Lastname
 				state.Changes = append(state.Changes, "created at "+user.CreatedAt)
 			case "address":
-				address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
+				address, _ := tools.Unmarshal[events.AddressUpdated](eventData) // Use events.AddressUpdated
 				state.Address = address.Address
 				state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
 			case "addressv2":
-				address, _ := tools.Unmarshal[AddressUpdated](msg.Data)
+				address, _ := tools.Unmarshal[events.AddressUpdated](eventData) // Use events.AddressUpdated
 				state.Address = address.Address
 				state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
 			case "addressv3":
-				address, _ := tools.Unmarshal[AddressUpdatedV3](msg.Data)
+				address, _ := tools.Unmarshal[events.AddressUpdatedV3](eventData) // Use events.AddressUpdatedV3
 				state.Address = address.Address + ", " + address.City + ", " + address.Country
 				state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
 			default:
-				log.Printf("Unknown event: %s with payload %s", getEvent(msg.Subject), msg.Data)
+				log.Printf("Unknown event: %s with payload %s", events.GetEvent(eventSubject), eventData) // Use events.GetEvent
 			}
 		}
 	}
@@ -245,16 +277,7 @@ func replay[T any](ctx context.Context, nc *nats.Conn, domain, id string, fn onR
 	return fn(lctx, id, messages)
 }
 
-func getEvent(subject string) string {
-	parts := strings.SplitN(subject, ".", 3)
-	return parts[len(parts)-1]
-}
-
-func getID(subject string) string {
-	parts := strings.SplitN(subject, ".", 3)
-	return parts[1]
-}
-
+// getEvent and getID are now in pkg/events/utils.go
 type State struct {
 	ID       string
 	Name     string
@@ -266,20 +289,7 @@ type State struct {
 	Changes   []string
 }
 
-type UserCreated struct {
-	Name      string `json:"name"`
-	Lastname  string `json:"lastname"`
-	CreatedAt string `json:"created_at"`
-}
-
-type AddressUpdated struct {
-	Address   string `json:"address"`
-	CreatedAt string `json:"created_at"`
-}
-
-type AddressUpdatedV3 struct {
-	*AddressUpdated
-	City      string `json:"city"`
-	Country   string `json:"country"`
-	CreatedAt string `json:"created_at"`
-}
+// Event type definitions (UserCreated, AddressUpdated, AddressUpdatedV3)
+// were confirmed to be moved to pkg/events/types.go in a previous step.
+// This comment block in main.go is a placeholder for where they used to be.
+// No actual code lines for these types should exist below this point in main.go.

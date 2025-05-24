@@ -9,6 +9,7 @@ require (
 	github.com/goccy/go-json v0.10.4 // indirect
 	github.com/igrmk/treemap/v2 v2.0.1 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/mattn/go-sqlite3 v1.14.28 // indirect
 	github.com/minio/highwayhash v1.0.3 // indirect
 	github.com/nats-io/jwt/v2 v2.7.3 // indirect
 	github.com/nats-io/nats-server/v2 v2.10.26 // indirect
