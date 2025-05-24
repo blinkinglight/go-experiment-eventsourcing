@@ -26,10 +26,14 @@ func InitDB(filepath string) (*sql.DB, error) {
 			name TEXT,
 			lastname TEXT,
 			address TEXT,
+			city TEXT,
+			country TEXT,
 			updated_at TEXT
 		);
 	`)
 	if err != nil {
+		// Log the error for more context if PrepareContext fails
+		log.Printf("Error preparing CREATE TABLE statement: %v", err)
 		return nil, err
 	}
 	_, err = statement.Exec()
@@ -67,15 +71,18 @@ func HandleUserCreatedEvent(db *sql.DB, id, name, lastname, createdAt string) er
 	return nil
 }
 
-// HandleAddressUpdatedEvent handles the AddressUpdated event by updating the user's address.
-// If the user does not exist, it creates a new user with the given address.
-func HandleAddressUpdatedEvent(db *sql.DB, id, address, updatedAt string) error {
+// HandleAddressUpdatedEvent handles the AddressUpdated event by updating the user's address,
+// city, and country using the AddressUpdatedV3 payload.
+// If the user does not exist, it creates a new user with the given address details.
+func HandleAddressUpdatedEvent(db *sql.DB, id string, payload events.AddressUpdatedV3) error {
 	ctx := context.Background()
 	statement, err := db.PrepareContext(ctx, `
-		INSERT INTO users_read_model (id, address, updated_at)
-		VALUES (?, ?, ?)
+		INSERT INTO users_read_model (id, address, city, country, updated_at)
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		address = excluded.address,
+		city = excluded.city,
+		country = excluded.country,
 		updated_at = excluded.updated_at;
 	`)
 	if err != nil {
@@ -84,7 +91,13 @@ func HandleAddressUpdatedEvent(db *sql.DB, id, address, updatedAt string) error 
 	}
 	defer statement.Close()
 
-	_, err = statement.ExecContext(ctx, id, address, updatedAt)
+	// Use payload.AddressUpdated.Address if you want to ensure you get it from the embedded struct,
+	// or payload.Address if AddressUpdatedV3 might override Address directly (less likely for embedding).
+	// Assuming AddressUpdatedV3's Address field is the one to use or it's correctly populated by upcaster.
+	// The upcaster populates payload.AddressUpdated.Address and payload.Address is not a field of AddressUpdatedV3 directly.
+	// The AddressUpdatedV3 struct has an embedded *AddressUpdated. So payload.AddressUpdated.Address is correct.
+	// And payload.CreatedAt is the outer one.
+	_, err = statement.ExecContext(ctx, id, payload.AddressUpdated.Address, payload.City, payload.Country, payload.CreatedAt)
 	if err != nil {
 		log.Printf("Error executing statement for AddressUpdated event for ID %s: %v", id, err)
 		return fmt.Errorf("failed to execute statement for AddressUpdated event (ID: %s): %w", id, err)
@@ -139,44 +152,34 @@ processLoop:
 			log.Printf("Rebuilding: Processing event ID '%s', type '%s', data: %s", eventID, eventType, string(eventData))
 
 			var procErr error
-			switch eventType {
+			originalEventType := events.GetEvent(msg.Subject) // Get original event type
+
+			switch originalEventType {
 			case "created":
-				var user events.UserCreated
-				if err := tools.Unmarshal(eventData, &user); err != nil {
+				user, err := tools.Unmarshal[events.UserCreated](eventData)
+				if err != nil {
 					log.Printf("Rebuild: Error unmarshalling UserCreated for ID %s: %v", eventID, err)
 					procErr = err
 				} else {
 					procErr = HandleUserCreatedEvent(db, eventID, user.Name, user.Lastname, user.CreatedAt)
 				}
-			case "address", "addressv2":
-				var address events.AddressUpdated
-				if err := tools.Unmarshal(eventData, &address); err != nil {
-					log.Printf("Rebuild: Error unmarshalling AddressUpdated for ID %s: %v", eventID, err)
+			case "address", "addressv2", "addressv3":
+				v3Payload, err := events.UpcastToAddressUpdatedV3(eventData, originalEventType)
+				if err != nil {
+					log.Printf("Rebuild: Error upcasting event type '%s' for ID %s: %v", originalEventType, eventID, err)
 					procErr = err
 				} else {
-					procErr = HandleAddressUpdatedEvent(db, eventID, address.Address, address.CreatedAt)
-				}
-			case "addressv3":
-				var address events.AddressUpdatedV3
-				if err := tools.Unmarshal(eventData, &address); err != nil {
-					log.Printf("Rebuild: Error unmarshalling AddressUpdatedV3 for ID %s: %v", eventID, err)
-					procErr = err
-				} else {
-					fullAddress := address.Address
-					if address.City != "" {
-						fullAddress += ", " + address.City
-					}
-					if address.Country != "" {
-						fullAddress += ", " + address.Country
-					}
-					procErr = HandleAddressUpdatedEvent(db, eventID, fullAddress, address.CreatedAt)
+					procErr = HandleAddressUpdatedEvent(db, eventID, v3Payload)
 				}
 			default:
-				log.Printf("Rebuild: Unknown event type '%s' for ID %s", eventType, eventID)
+				log.Printf("Rebuild: Unknown event type '%s' for ID %s", originalEventType, eventID)
+				// Optionally, acknowledge and skip unknown types if they shouldn't stop the rebuild
+				// msg.Ack() // If we decide to ack and continue for unknown types
+				// continue
 			}
 
 			if procErr != nil {
-				log.Printf("Rebuild: Error processing event for ID %s, type '%s': %v", eventID, eventType, procErr)
+				log.Printf("Rebuild: Error processing event (original type: '%s') for ID %s: %v", originalEventType, eventID, procErr)
 				// Decide if we should stop or continue on error. For now, log and continue.
 				// processingError = true // Optionally flag to return an error at the end
 			}

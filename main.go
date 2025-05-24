@@ -158,43 +158,34 @@ func main() {
 
 		eventID := events.GetID(msg.Subject) // Use events.GetID
 
-		switch events.GetEvent(msg.Subject) { // Use events.GetEvent
+		originalEventType := events.GetEvent(msg.Subject)
+		eventData := msg.Data
+
+		switch originalEventType {
 		case "created":
-			user, err := tools.Unmarshal[events.UserCreated](msg.Data) // Use events.UserCreated
+			user, err := tools.Unmarshal[events.UserCreated](eventData)
 			if err != nil {
-				log.Printf("Error unmarshalling UserCreated: %v", err)
+				log.Printf("NATS Sub: Error unmarshalling UserCreated for ID %s: %v", eventID, err)
 				msg.Ack()
 				return
 			}
-			err = HandleUserCreatedEvent(db, eventID, user.Name, user.Lastname, user.CreatedAt)
-			if err != nil {
-				log.Printf("Error handling UserCreatedEvent for ID %s: %v", eventID, err)
+			if err := HandleUserCreatedEvent(db, eventID, user.Name, user.Lastname, user.CreatedAt); err != nil {
+				// Error is already logged in HandleUserCreatedEvent, log context here
+				log.Printf("NATS Sub: Error handling UserCreatedEvent for ID %s: %v", eventID, err)
 			}
-		case "address", "addressv2":
-			address, err := tools.Unmarshal[events.AddressUpdated](msg.Data) // Use events.AddressUpdated
+		case "address", "addressv2", "addressv3":
+			v3Payload, err := events.UpcastToAddressUpdatedV3(eventData, originalEventType)
 			if err != nil {
-				log.Printf("Error unmarshalling AddressUpdated: %v", err)
+				log.Printf("NATS Sub: Error upcasting event type '%s' for ID %s: %v", originalEventType, eventID, err)
 				msg.Ack()
 				return
 			}
-			err = HandleAddressUpdatedEvent(db, eventID, address.Address, address.CreatedAt)
-			if err != nil {
-				log.Printf("Error handling AddressUpdatedEvent for ID %s: %v", eventID, err)
-			}
-		case "addressv3":
-			address, err := tools.Unmarshal[events.AddressUpdatedV3](msg.Data) // Use events.AddressUpdatedV3
-			if err != nil {
-				log.Printf("Error unmarshalling AddressUpdatedV3: %v", err)
-				msg.Ack()
-				return
-			}
-			fullAddress := address.Address + ", " + address.City + ", " + address.Country
-			err = HandleAddressUpdatedEvent(db, eventID, fullAddress, address.CreatedAt)
-			if err != nil {
-				log.Printf("Error handling AddressUpdatedEvent (V3) for ID %s: %v", eventID, err)
+			if err := HandleAddressUpdatedEvent(db, eventID, v3Payload); err != nil {
+				// Error is already logged in HandleAddressUpdatedEvent, log context here
+				log.Printf("NATS Sub: Error handling AddressUpdatedEvent (original type: '%s') for ID %s: %v", originalEventType, eventID, err)
 			}
 		default:
-			log.Printf("Unknown event: %s with payload %s", events.GetEvent(msg.Subject), msg.Data) // Use events.GetEvent
+			log.Printf("NATS Sub: Unknown event type '%s' for ID %s", originalEventType, eventID)
 		}
 		msg.Ack()
 		// maybe tell FE to update
@@ -216,27 +207,38 @@ func replayFn(ctx context.Context, id string, msgs <-chan *nats.Msg) (state Stat
 				return
 			}
 			eventSubject := msg.Subject // Store for repeated use
-			eventData := msg.Data       // Store for repeated use
-			switch events.GetEvent(eventSubject) { // Use events.GetEvent
+			eventData := msg.Data
+			originalEventType := events.GetEvent(eventSubject)
+
+			switch originalEventType {
 			case "created":
-				user, _ := tools.Unmarshal[events.UserCreated](eventData) // Use events.UserCreated
+				user, err := tools.Unmarshal[events.UserCreated](eventData)
+				if err != nil {
+					log.Printf("replayFn: Error unmarshalling UserCreated: %v", err)
+					continue // Skip this event
+				}
 				state.Name = user.Name
 				state.Lastname = user.Lastname
 				state.Changes = append(state.Changes, "created at "+user.CreatedAt)
-			case "address":
-				address, _ := tools.Unmarshal[events.AddressUpdated](eventData) // Use events.AddressUpdated
-				state.Address = address.Address
-				state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
-			case "addressv2":
-				address, _ := tools.Unmarshal[events.AddressUpdated](eventData) // Use events.AddressUpdated
-				state.Address = address.Address
-				state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
-			case "addressv3":
-				address, _ := tools.Unmarshal[events.AddressUpdatedV3](eventData) // Use events.AddressUpdatedV3
-				state.Address = address.Address + ", " + address.City + ", " + address.Country
-				state.Changes = append(state.Changes, "address updated at"+address.CreatedAt)
+			case "address", "addressv2", "addressv3":
+				v3Payload, err := events.UpcastToAddressUpdatedV3(eventData, originalEventType)
+				if err != nil {
+					log.Printf("replayFn: Error upcasting event type '%s': %v", originalEventType, err)
+					continue // Skip this event
+				}
+				// Construct address string, handling potential empty city/country
+				fullAddress := v3Payload.AddressUpdated.Address
+				if v3Payload.City != "" {
+					fullAddress += ", " + v3Payload.City
+				}
+				if v3Payload.Country != "" {
+					fullAddress += ", " + v3Payload.Country
+				}
+				state.Address = fullAddress
+				state.UpdatedAt = v3Payload.CreatedAt // Use the CreatedAt from the V3 payload
+				state.Changes = append(state.Changes, "address updated at "+v3Payload.CreatedAt)
 			default:
-				log.Printf("Unknown event: %s with payload %s", events.GetEvent(eventSubject), eventData) // Use events.GetEvent
+				log.Printf("replayFn: Unknown event type '%s' with payload %s", originalEventType, eventData)
 			}
 		}
 	}
